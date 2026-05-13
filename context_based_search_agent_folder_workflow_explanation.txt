@@ -1,0 +1,893 @@
+CONTEXT BASED SEARCH AGENT - PROJECT FOLDER AND WORKFLOW EXPLANATION
+=====================================================================
+
+Purpose of this document
+------------------------
+This document explains the high-level purpose of each project folder and each important file in the Context Based Search Agent architecture.
+It is written for easy manager-level explanation and review.
+
+Overall Project Objective
+-------------------------
+The project builds an enterprise search and agentic RAG system using:
+
+1. Azure OpenAI for language understanding, routing, embeddings, and answer generation.
+2. Azure AI Search for document-based knowledge retrieval from enterprise documents.
+3. Elasticsearch for structured, semi-structured, analytical, and query-agent-based retrieval.
+4. FastAPI as the backend API layer.
+5. Optional Azure Functions wrapper for deployment as serverless APIs.
+6. Power Apps, Bot Services, Copilot Studio, MDM UI, or other frontend systems can call the backend APIs.
+
+High-Level Business Flow
+------------------------
+User asks a question from UI / Bot / Power Apps.
+The backend receives the question.
+The Orchestrator Agent decides whether the query should go to:
+
+1. RAG Agent - for document/knowledge-based answers.
+2. Query Agent - for Elasticsearch/records/analytics-based answers.
+3. General Agent - for normal non-retrieval responses.
+
+The selected agent retrieves relevant context, sends context to Azure OpenAI, and returns a final answer with sources.
+
+
+PROJECT FOLDER STRUCTURE
+========================
+
+context-based-search-agent/
+|
+|-- app/
+|   |-- main.py
+|   |-- config.py
+|   |-- schemas.py
+|   |
+|   |-- agents/
+|   |   |-- orchestrator_agent.py
+|   |   |-- rag_agent.py
+|   |   |-- query_agent.py
+|   |   |-- safety_agent.py
+|   |
+|   |-- core/
+|   |   |-- azure_openai_client.py
+|   |   |-- azure_search_client.py
+|   |   |-- elastic_client.py
+|   |   |-- cache_client.py
+|   |   |-- blob_client.py
+|   |   |-- logger.py
+|   |
+|   |-- ingestion/
+|   |   |-- document_processor.py
+|   |   |-- chunker.py
+|   |   |-- index_to_ai_search.py
+|   |   |-- index_to_elastic.py
+|   |
+|   |-- prompts/
+|   |   |-- orchestrator_prompt.py
+|   |   |-- query_agent_prompt.py
+|   |   |-- summarizer_prompt.py
+|   |
+|   |-- retrieval/
+|   |   |-- azure_ai_search_retriever.py
+|   |   |-- elastic_retriever.py
+|   |   |-- query_validator.py
+|   |
+|   |-- utils/
+|       |-- json_utils.py
+|
+|-- azure_function/
+|   |-- function_app.py
+|   |-- host.json
+|   |-- local.settings.json.example
+|
+|-- scripts/
+|   |-- create_ai_search_index.py
+|   |-- create_elastic_index.py
+|
+|-- requirements.txt
+|-- .env.example
+|-- README.md
+
+
+1. app/ FOLDER
+==============
+
+Purpose:
+--------
+The app folder contains the main application code. It includes API endpoints, agents, clients, retrieval logic, ingestion logic, prompts, and utility functions.
+
+This is the heart of the complete project.
+
+Important files directly inside app/
+------------------------------------
+
+1. main.py
+----------
+Purpose:
+main.py is the API entry point of the application.
+
+What it does:
+- Starts the FastAPI application.
+- Exposes API endpoints such as /chat, /ingest, and /health.
+- Receives user questions from UI, Bot, Power Apps, or Copilot Studio.
+- Calls the Orchestrator Agent for answering questions.
+- Calls ingestion modules when documents need to be indexed.
+- Handles exceptions and returns API responses.
+
+Workflow role:
+Frontend systems do not directly call RAG Agent or Query Agent.
+Frontend systems call main.py APIs.
+main.py then delegates work to the correct backend component.
+
+Example:
+User asks: "Show open defects by severity"
+/chat endpoint receives this request.
+main.py calls orchestrator_agent.py.
+The orchestrator decides query_agent.
+The final answer is returned through main.py.
+
+
+2. config.py
+------------
+Purpose:
+config.py manages all environment configuration.
+
+What it does:
+- Reads values from .env file.
+- Stores Azure OpenAI endpoint and keys.
+- Stores Azure AI Search endpoint and keys.
+- Stores Elasticsearch connection details.
+- Stores Redis/cache details.
+- Stores app-level settings like LOG_LEVEL and CACHE_ENABLED.
+
+Workflow role:
+Every module that needs credentials or service configuration imports settings from config.py.
+
+Example:
+azure_openai_client.py needs AZURE_OPENAI_ENDPOINT.
+elastic_client.py needs ELASTIC_CLOUD_ID.
+azure_search_client.py needs AZURE_SEARCH_ENDPOINT.
+All of these values come from config.py.
+
+
+3. schemas.py
+-------------
+Purpose:
+schemas.py defines request and response models.
+
+What it does:
+- Defines the structure of incoming API requests.
+- Defines the structure of outgoing API responses.
+- Uses Pydantic models for validation.
+
+Important models:
+- ChatRequest: request body for /chat API.
+- ChatResponse: response body from /chat API.
+- IngestionRequest: request body for /ingest API.
+- IngestionResponse: response after document indexing.
+- ElasticQueryPlan: structure of Elasticsearch query planning output.
+
+Workflow role:
+Ensures APIs receive correct input and return consistent output.
+
+
+2. app/agents/ FOLDER
+=====================
+
+Purpose:
+--------
+The agents folder contains the decision-making and reasoning components of the project.
+
+Agents are responsible for:
+- Routing the query.
+- Running RAG retrieval.
+- Running Elasticsearch query retrieval.
+- Applying safety checks.
+- Preparing the final answer.
+
+Files:
+------
+
+1. orchestrator_agent.py
+------------------------
+Purpose:
+This is the main routing brain of the system.
+
+What it does:
+- Receives the user question.
+- Applies basic safety check.
+- Uses Azure OpenAI to classify the question.
+- Decides whether the question should go to:
+  a. RAG Agent
+  b. Query Agent
+  c. General response
+- Calls the selected agent.
+- Returns final answer, route, sources, and metadata.
+
+Workflow role:
+It acts like a traffic controller.
+
+Example:
+Question: "What is the policy for vendor onboarding?"
+Route: rag_agent
+Reason: This is likely from enterprise documents.
+
+Question: "Show top 5 open defects by severity"
+Route: query_agent
+Reason: This requires structured analytics from Elasticsearch.
+
+
+2. rag_agent.py
+---------------
+Purpose:
+RAG Agent handles document-based questions.
+
+What it does:
+- Receives question from Orchestrator.
+- Calls Azure AI Search retriever.
+- Gets relevant document chunks.
+- Sends question + retrieved documents to Azure OpenAI.
+- Generates grounded answer with sources.
+
+Workflow role:
+Used when user asks about documents, policies, manuals, SOPs, SharePoint content, or knowledge base.
+
+Example:
+Question: "Summarize the SOP for warranty approval."
+RAG Agent retrieves related SOP document chunks and generates answer.
+
+
+3. query_agent.py
+-----------------
+Purpose:
+Query Agent handles Elasticsearch-based questions.
+
+What it does:
+- Receives question from Orchestrator.
+- Calls elastic_retriever.py.
+- Generates query plan.
+- Performs keyword, filter, vector, hybrid, or aggregation search.
+- Extracts Elasticsearch hits and aggregations.
+- Sends retrieved results to Azure OpenAI for summarization.
+- Returns answer with sources and query metadata.
+
+Workflow role:
+Used for structured, analytical, or record-based questions.
+
+Example:
+Question: "Count open defects by severity."
+Query Agent identifies aggregation need, gets counts from Elasticsearch, and summarizes result.
+
+
+4. safety_agent.py
+------------------
+Purpose:
+Safety Agent applies basic guardrails.
+
+What it does:
+- Checks for unsafe or unwanted inputs.
+- Blocks suspicious phrases like attempts to reveal system prompt or delete data.
+- Provides extension point for Azure AI Content Safety.
+
+Workflow role:
+Runs before routing or retrieval to reduce misuse risk.
+
+
+3. app/core/ FOLDER
+===================
+
+Purpose:
+--------
+The core folder contains reusable service clients and foundational utilities.
+
+These files connect the application to external services such as Azure OpenAI, Azure AI Search, Elasticsearch, Blob Storage, Redis, and logging.
+
+Files:
+------
+
+1. azure_openai_client.py
+------------------------
+Purpose:
+Central client for Azure OpenAI.
+
+What it does:
+- Creates Azure OpenAI client.
+- Provides get_chat_completion() for LLM responses.
+- Provides get_embedding() for vector embeddings.
+
+Workflow role:
+Used by:
+- Orchestrator Agent for route classification.
+- Query Agent for query planning and summarization.
+- RAG Agent for final answer generation.
+- Ingestion modules for generating embeddings.
+
+
+2. azure_search_client.py
+-------------------------
+Purpose:
+Central client for Azure AI Search.
+
+What it does:
+- Connects to Azure AI Search index.
+- Runs keyword search.
+- Runs vector search.
+- Uploads documents to Azure AI Search.
+
+Workflow role:
+Used mainly by RAG Agent and document ingestion pipeline.
+
+
+3. elastic_client.py
+--------------------
+Purpose:
+Central client for Elasticsearch.
+
+What it does:
+- Connects to Elasticsearch.
+- Runs Elasticsearch search queries.
+- Indexes documents into Elasticsearch.
+- Creates Elasticsearch index if needed.
+
+Workflow role:
+Used mainly by Query Agent and ingestion pipeline.
+
+
+4. cache_client.py
+------------------
+Purpose:
+Handles cache/retrieval acceleration.
+
+What it does:
+- Generates cache keys for repeated questions.
+- Reads cached responses from Redis.
+- Saves final responses to Redis.
+
+Workflow role:
+Used to reduce repeated Azure OpenAI and search calls.
+If same or similar question is asked again, cache can return answer faster.
+
+
+5. blob_client.py
+-----------------
+Purpose:
+Handles Azure Blob Storage operations.
+
+What it does:
+- Uploads text or document content to Blob Storage.
+- Can be extended to upload raw SharePoint files.
+
+Workflow role:
+Used in ingestion pipeline when SharePoint documents need to be stored before processing.
+
+
+6. logger.py
+------------
+Purpose:
+Provides common logging across all modules.
+
+What it does:
+- Creates consistent logs with timestamp, level, module name, and message.
+- Helps debug API flow, agent routing, search calls, and errors.
+
+Workflow role:
+Used by main.py, agents, retrievers, and ingestion modules to trace end-to-end execution.
+
+
+4. app/ingestion/ FOLDER
+========================
+
+Purpose:
+--------
+The ingestion folder handles document processing and indexing.
+
+This folder is responsible for converting raw documents into searchable chunks and indexing those chunks into Azure AI Search and Elasticsearch.
+
+Files:
+------
+
+1. document_processor.py
+------------------------
+Purpose:
+Cleans and prepares raw document text.
+
+What it does:
+- Removes unwanted characters.
+- Normalizes line breaks.
+- Prepares clean text for chunking.
+
+Workflow role:
+First step after receiving document content through /ingest API.
+
+Future extension:
+Can integrate Azure AI Document Intelligence for PDF, scanned documents, forms, and tables.
+
+
+2. chunker.py
+-------------
+Purpose:
+Splits large documents into smaller chunks.
+
+What it does:
+- Takes long text.
+- Splits it into smaller overlapping chunks.
+- Helps LLM and vector search work effectively.
+
+Workflow role:
+Azure OpenAI and search engines work better with chunks instead of very large documents.
+
+Example:
+A 50-page policy document becomes multiple chunks.
+Each chunk is embedded and indexed separately.
+
+
+3. index_to_ai_search.py
+------------------------
+Purpose:
+Indexes chunks into Azure AI Search.
+
+What it does:
+- Takes document chunks.
+- Generates embedding for each chunk using Azure OpenAI.
+- Uploads chunk, metadata, and vector to Azure AI Search.
+
+Workflow role:
+Prepares content for RAG Agent retrieval.
+
+
+4. index_to_elastic.py
+----------------------
+Purpose:
+Indexes chunks into Elasticsearch.
+
+What it does:
+- Takes document chunks.
+- Generates embedding for each chunk.
+- Stores document text, metadata, and vector in Elasticsearch.
+
+Workflow role:
+Prepares content for Query Agent retrieval, vector search, hybrid search, and analytics.
+
+
+5. app/prompts/ FOLDER
+======================
+
+Purpose:
+--------
+The prompts folder stores prompt templates used by Azure OpenAI.
+
+Instead of hardcoding long instructions inside agents, prompts are stored separately for maintainability.
+
+Files:
+------
+
+1. orchestrator_prompt.py
+-------------------------
+Purpose:
+Defines routing instructions for Orchestrator Agent.
+
+What it does:
+- Tells LLM how to classify a question.
+- Defines routes: rag_agent, query_agent, general.
+- Forces LLM to return JSON.
+
+Workflow role:
+Used by orchestrator_agent.py.
+
+
+2. query_agent_prompt.py
+------------------------
+Purpose:
+Defines instructions for Elasticsearch query planning and DSL generation.
+
+What it does:
+- Tells LLM how to classify query type.
+- Supports keyword_search, filter_search, aggregation, vector_search, hybrid_search.
+- Defines safe Elasticsearch DSL generation rules.
+
+Workflow role:
+Used by elastic_retriever.py.
+
+
+3. summarizer_prompt.py
+-----------------------
+Purpose:
+Defines how final answers should be generated.
+
+What it does:
+- Tells LLM to answer only from retrieved context.
+- Enforces final response structure.
+- Prevents hallucination as much as possible.
+
+Workflow role:
+Used by RAG Agent and Query Agent.
+
+
+6. app/retrieval/ FOLDER
+========================
+
+Purpose:
+--------
+The retrieval folder contains the logic for fetching relevant information from search systems.
+
+Agents do not directly query Azure AI Search or Elasticsearch.
+Agents call retrievers.
+
+Files:
+------
+
+1. azure_ai_search_retriever.py
+-------------------------------
+Purpose:
+Retrieves relevant document chunks from Azure AI Search.
+
+What it does:
+- Runs keyword search.
+- Generates query embedding.
+- Runs vector search.
+- Merges keyword and vector results.
+
+Workflow role:
+Used by RAG Agent.
+
+
+2. elastic_retriever.py
+-----------------------
+Purpose:
+Retrieves data from Elasticsearch.
+
+What it does:
+- Plans query type using Azure OpenAI.
+- Runs keyword search if needed.
+- Runs vector search if needed.
+- Generates Elasticsearch DSL for filter/aggregation/hybrid queries.
+- Validates query before execution.
+- Executes query on Elasticsearch.
+
+Workflow role:
+Used by Query Agent.
+
+
+3. query_validator.py
+---------------------
+Purpose:
+Validates LLM-generated Elasticsearch DSL.
+
+What it does:
+- Allows only safe query keys.
+- Blocks script, update, delete, and dangerous query patterns.
+- Limits result size.
+
+Workflow role:
+Critical safety layer for Query Agent.
+Prevents unsafe Elasticsearch operations.
+
+
+7. app/utils/ FOLDER
+====================
+
+Purpose:
+--------
+The utils folder contains helper functions used across the application.
+
+Files:
+------
+
+1. json_utils.py
+----------------
+Purpose:
+Extracts valid JSON from LLM output.
+
+What it does:
+- Cleans markdown-style JSON.
+- Extracts JSON object from model response.
+- Converts JSON text to Python dictionary.
+
+Workflow role:
+Used when Azure OpenAI returns query plans or route decisions.
+This is important because LLMs may sometimes wrap JSON inside markdown formatting.
+
+
+8. azure_function/ FOLDER
+=========================
+
+Purpose:
+--------
+The azure_function folder allows the same FastAPI application to be deployed as Azure Functions.
+
+This is useful because your architecture shows Azure Function Apps.
+
+Files:
+------
+
+1. function_app.py
+------------------
+Purpose:
+Wraps FastAPI app inside Azure Functions ASGI wrapper.
+
+What it does:
+- Imports FastAPI app from app/main.py.
+- Exposes it as an Azure Function app.
+
+Workflow role:
+Allows APIs like /chat and /ingest to run serverlessly in Azure Functions.
+
+
+2. host.json
+------------
+Purpose:
+Azure Functions host configuration.
+
+What it does:
+- Defines function runtime behavior.
+- Removes route prefix if configured.
+
+Workflow role:
+Controls how Azure Functions exposes HTTP routes.
+
+
+3. local.settings.json.example
+------------------------------
+Purpose:
+Sample local settings for Azure Functions.
+
+What it does:
+- Provides template for local Azure Function runtime variables.
+- Should be copied to local.settings.json for local function testing.
+
+Workflow role:
+Used only when testing Azure Functions locally.
+
+
+9. scripts/ FOLDER
+==================
+
+Purpose:
+--------
+The scripts folder contains one-time setup scripts.
+
+These scripts are usually run manually during environment setup.
+
+Files:
+------
+
+1. create_ai_search_index.py
+----------------------------
+Purpose:
+Creates or updates Azure AI Search index.
+
+What it does:
+- Defines fields like id, title, content, source, category, vector field.
+- Creates vector search configuration.
+- Creates/updates Azure AI Search index.
+
+Workflow role:
+Must be run before indexing documents into Azure AI Search.
+
+
+2. create_elastic_index.py
+--------------------------
+Purpose:
+Creates Elasticsearch index with mapping.
+
+What it does:
+- Defines fields like title, content, status, severity, vehicle_model.
+- Defines content_vector as dense_vector.
+- Creates Elasticsearch index if not already present.
+
+Workflow role:
+Must be run before indexing data into Elasticsearch.
+
+
+END-TO-END WORKFLOW FLOWCHART
+=============================
+
+A. User Chat Workflow
+---------------------
+
+[User / MDM UI / Bot / Power Apps]
+                |
+                v
+        [POST /chat API]
+                |
+                v
+          [app/main.py]
+                |
+                v
+      [Check Cache - cache_client.py]
+                |
+                |-- Cache Hit --> [Return Cached Answer]
+                |
+                |-- Cache Miss
+                v
+      [orchestrator_agent.py]
+                |
+                v
+        [safety_agent.py]
+                |
+                v
+ [Azure OpenAI route classification]
+                |
+                v
+        +-------------------------+
+        | Route Decision          |
+        +-------------------------+
+           |          |          |
+           |          |          |
+           v          v          v
+    [RAG Agent] [Query Agent] [General Answer]
+        |            |             |
+        |            |             v
+        |            |      [Azure OpenAI]
+        |            |             |
+        |            |             v
+        |            |      [Final Answer]
+        |            |
+        |            v
+        |    [elastic_retriever.py]
+        |            |
+        |            v
+        |    [Plan Query Type]
+        |            |
+        |            v
+        |    [Keyword / Filter / Aggregation / Vector / Hybrid]
+        |            |
+        |            v
+        |    [query_validator.py]
+        |            |
+        |            v
+        |    [Elasticsearch]
+        |            |
+        |            v
+        |    [Retrieved Records / Aggregations]
+        |            |
+        |            v
+        |    [Azure OpenAI Summarization]
+        |            |
+        |            v
+        |      [Final Answer + Sources]
+        |
+        v
+[azure_ai_search_retriever.py]
+        |
+        v
+[Keyword + Vector Search in Azure AI Search]
+        |
+        v
+[Retrieved Document Chunks]
+        |
+        v
+[Azure OpenAI Summarization]
+        |
+        v
+[Final Answer + Sources]
+
+
+B. Document Ingestion Workflow
+------------------------------
+
+[SharePoint / Manual Upload / Power Automate]
+                |
+                v
+          [POST /ingest API]
+                |
+                v
+           [app/main.py]
+                |
+                v
+     [document_processor.py]
+                |
+                v
+           [chunker.py]
+                |
+                v
+       +-----------------------+
+       | For Each Text Chunk   |
+       +-----------------------+
+                |
+                v
+      [Azure OpenAI Embedding]
+                |
+       +--------+---------+
+       |                  |
+       v                  v
+[index_to_ai_search.py] [index_to_elastic.py]
+       |                  |
+       v                  v
+[Azure AI Search Index] [Elasticsearch Index]
+       |                  |
+       v                  v
+[RAG Agent Ready]       [Query Agent Ready]
+
+
+C. Query Agent Detailed Workflow
+--------------------------------
+
+[User Question]
+      |
+      v
+[Orchestrator selects query_agent]
+      |
+      v
+[query_agent.py]
+      |
+      v
+[elastic_retriever.py]
+      |
+      v
+[Azure OpenAI Query Planner]
+      |
+      v
++----------------------------------+
+| Query Type Decision              |
++----------------------------------+
+| keyword_search                   |
+| filter_search                    |
+| aggregation                      |
+| vector_search                    |
+| hybrid_search                    |
++----------------------------------+
+      |
+      v
+[Generate Elasticsearch Query]
+      |
+      v
+[query_validator.py Safety Check]
+      |
+      v
+[Elasticsearch Execution]
+      |
+      v
+[Records / Aggregations Returned]
+      |
+      v
+[Azure OpenAI Summarizer]
+      |
+      v
+[Final Business Answer]
+
+
+D. RAG Agent Detailed Workflow
+------------------------------
+
+[User Question]
+      |
+      v
+[Orchestrator selects rag_agent]
+      |
+      v
+[rag_agent.py]
+      |
+      v
+[azure_ai_search_retriever.py]
+      |
+      v
+[Keyword Search + Vector Search]
+      |
+      v
+[Relevant Document Chunks]
+      |
+      v
+[Azure OpenAI Summarizer]
+      |
+      v
+[Grounded Answer with Sources]
+
+
+MANAGER-LEVEL SUMMARY
+=====================
+
+This project is designed as a modular enterprise AI search architecture.
+
+1. agents folder contains business decision and agent logic.
+2. core folder contains reusable service connectors for Azure OpenAI, Azure AI Search, Elasticsearch, Blob, Cache, and Logging.
+3. ingestion folder prepares documents and indexes them into search systems.
+4. prompts folder stores LLM instructions for routing, query planning, and answer generation.
+5. retrieval folder contains actual search and retrieval logic.
+6. utils folder contains helper utilities like JSON extraction from LLM responses.
+7. azure_function folder enables deployment of the same FastAPI APIs as Azure Functions.
+8. scripts folder contains setup scripts for creating Azure AI Search and Elasticsearch indexes.
+
+The architecture cleanly separates responsibilities, making the system easier to develop, debug, extend, secure, and deploy.
+
+Simple one-line explanation:
+----------------------------
+The project takes a user question, routes it to the right agent, retrieves relevant information from Azure AI Search or Elasticsearch, uses Azure OpenAI to generate a grounded answer, and returns the answer with sources.
